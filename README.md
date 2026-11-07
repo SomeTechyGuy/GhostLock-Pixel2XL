@@ -1,10 +1,12 @@
+# THIS PROJECT IS INCOMPLETE, NO ROOT ACCESS HAS BEEN ACHIEVED YET.
+
 # GhostLock 4.4
+## This project uses AI for a lot of stuff (other than the original code from [R0rt1z2](https://github.com/R0rt1z2) and this README which I wrote manually).
 
-Temporary root for the Amazon Fire TV Stick Lite (`sheldon`) and Fire TV Stick 3rd Gen (`sheldonp`) on 4.4 kernels, adapted from CVE-2026-43499 in [CyberMeowfia](https://github.com/NebuSec/CyberMeowfia).
 
-Supported builds, downloads, instructions and warnings are all in the XDA thread. Read it before running anything:
+Temporary root for the Google Pixel 2 XL on Android 11 (Build RP1A.201005.004.A1 from December 2020), adapted from CVE-2026-43499 in [CyberMeowfia](https://github.com/NebuSec/CyberMeowfia).
 
-- Fire TV Stick Lite / 3rd Gen, `sheldon` / `sheldonp`: <https://xdaforums.com/t/temp-root-downgrade-fire-tv-stick-lite-3rd-gen-sheldon-sheldonp.4800976/>
+This repo will only support rooting Android 11 RP1A.201005.004.A1 on kernel 4.4.223-g52750b8f2138-ab6846512, do not ask for other Android versions or devices to be supported.
 
 ## Building
 
