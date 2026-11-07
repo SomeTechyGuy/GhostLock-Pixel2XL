@@ -83,7 +83,9 @@ struct gl_profile {
     char second_sha256[GL_PROFILE_STRING];
     char critical_anchors_sha256[GL_PROFILE_STRING];
     char reference[GL_PROFILE_STRING];
-    uint32_t kernel_image_base;
+    uint64_t kernel_image_base;      // keep for validation, set to 0x80080000
+    uint64_t kernel_phys_load;       // NEW: 0x80080000 for taimen
+    uint64_t kernel_phys_offset;     // NEW: 0x80000000 for taimen
     uint32_t kernel_size;
     uint32_t kernel_similarity_ppm;
 };

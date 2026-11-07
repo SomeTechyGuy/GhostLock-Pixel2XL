@@ -69,6 +69,8 @@ enum profile_field {
     PF_ANCHORS_SHA256,
     PF_REFERENCE,
     PF_KERNEL_BASE,
+    PF_KERNEL_PHYS_LOAD,        // NEW
+    PF_KERNEL_PHYS_OFFSET,      // NEW
     PF_KERNEL_SIZE,
     PF_SIMILARITY_PPM,
     PF_COUNT
@@ -109,31 +111,19 @@ static int assign_string(char *destination, size_t destination_size, const char 
     return 1;
 }
 
-static int assign_u32(uint32_t *destination, const char *value, uint64_t *present,
+static int assign_u64(uint64_t *destination, const char *value, uint64_t *present,
                       enum profile_field field, const char *key, char *error, size_t error_size) {
     uint64_t bit = UINT64_C(1) << field;
-    if (*present & bit) {
-        set_error(error, error_size, "duplicate profile key: %s", key);
-        return 0;
-    }
+    if (*present & bit) { set_error(error, error_size, "duplicate profile key: %s", key); return 0; }
     errno = 0;
     char *end = NULL;
-    unsigned long parsed = strtoul(value, &end, 0);
-    if (errno || !end || *end || end == value || parsed > UINT32_MAX) {
+    unsigned long long parsed = strtoull(value, &end, 0);
+    if (errno || !end || *end || end == value) {
         set_error(error, error_size, "invalid integer for profile key: %s", key);
         return 0;
     }
-    *destination = (uint32_t)parsed;
+    *destination = (uint64_t)parsed;
     *present |= bit;
-    return 1;
-}
-
-static int valid_sha256(const char *value) {
-    if (strlen(value) != 64)
-        return 0;
-    for (const char *p = value; *p; p++)
-        if (!isxdigit((unsigned char)*p))
-            return 0;
     return 1;
 }
 
@@ -202,7 +192,12 @@ static int parse_entry(struct gl_profile *profile, uint64_t *present, const char
     STRING_ENTRY("analysis.second_sha256", second_sha256, PF_SECOND_SHA256);
     STRING_ENTRY("analysis.critical_anchors_sha256", critical_anchors_sha256, PF_ANCHORS_SHA256);
     STRING_ENTRY("analysis.reference", reference, PF_REFERENCE);
-    U32_ENTRY("analysis.kernel_image_base", kernel_image_base, PF_KERNEL_BASE);
+    if (!strcmp(key, "analysis.kernel_image_base"))
+        return assign_u64(&profile->kernel_image_base, value, present, PF_KERNEL_BASE, key, error, error_size);
+    if (!strcmp(key, "analysis.kernel_phys_load"))
+        return assign_u64(&profile->kernel_phys_load, value, present, PF_KERNEL_PHYS_LOAD, key, error, error_size);
+    if (!strcmp(key, "analysis.kernel_phys_offset"))
+        return assign_u64(&profile->kernel_phys_offset, value, present, PF_KERNEL_PHYS_OFFSET, key, error, error_size);
     U32_ENTRY("analysis.kernel_size", kernel_size, PF_KERNEL_SIZE);
     U32_ENTRY("analysis.kernel_similarity_ppm", kernel_similarity_ppm, PF_SIMILARITY_PPM);
 
