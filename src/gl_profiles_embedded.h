@@ -53,8 +53,8 @@ static const struct gl_profile gl_embedded_profiles[] = {
         .futex_hash_seed    = 0xDEADBEEFu,
         .futex_hash_buckets = 2048u,
         .stamp_socket_kind  = 1u,
-        .stamp_copy_depth   = 0x160u,
-        .stamp_waiter_depth = 0x118u,
+        .stamp_copy_depth   = 0x1b0u,   // try 0x1a0, 0x1b0, 0x1c0, 0x1d0
+        .stamp_waiter_depth = 0x110u,
 
         .ota_sha256              = "f543d48a4e9fdb4091695117cc38e47690e42c2b82526c866719c83ef020febd",
         .boot_sha256             = "f543d48a4e9fdb4091695117cc38e47690e42c2b82526c866719c83ef020febd",

